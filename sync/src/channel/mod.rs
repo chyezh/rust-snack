@@ -1,3 +1,3 @@
-mod arc;
-mod channel;
-mod oneshot;
+pub mod arc;
+pub mod chan;
+pub mod oneshot;

@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::atomic::Ordering::{Relaxed, Release};
 use std::sync::Arc;
 use std::{cell::UnsafeCell, mem::MaybeUninit, sync::atomic::AtomicBool};
 

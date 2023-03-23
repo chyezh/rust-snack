@@ -8,15 +8,24 @@ pub struct Channel<T> {
     item_ready: Condvar,
 }
 
+impl<T> Default for Channel<T> {
+    fn default() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            item_ready: Condvar::new(),
+        }
+    }
+}
+
 impl<T> Channel<T> {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
             item_ready: Condvar::new(),
         }
     }
 
-    fn send(&self, value: T) {
+    pub fn send(&self, value: T) {
         let mut queue = self.queue.lock().unwrap();
         queue.push_back(value);
         if queue.len() == 1 {
@@ -24,7 +33,7 @@ impl<T> Channel<T> {
         }
     }
 
-    fn recv(&self) -> T {
+    pub fn recv(&self) -> T {
         let mut queue = self
             .item_ready
             .wait_while(self.queue.lock().unwrap(), |q| q.is_empty())
@@ -35,7 +44,9 @@ impl<T> Channel<T> {
 }
 
 mod tests {
+    #[allow(unused_imports)]
     use super::Channel;
+    #[allow(unused_imports)]
     use std::{sync::Arc, thread};
 
     #[test]
