@@ -7,8 +7,9 @@ use std::{
 
 use atomic_wait::{wait, wake_one};
 
-const MUTEX_UNLOCKED: u32 = 0;
-const MUTEX_LOCKED: u32 = 1;
+const MUTEX_UNLOCKED: u32 = 0; // unlocked
+const MUTEX_LOCKED: u32 = 1; // locked, no contention
+const MUTEX_CONTENTION: u32 = 2; // locked, other threads waiting
 
 /// A mutual-exclusive lock implementation.
 pub struct Mutex<T> {
@@ -34,9 +35,16 @@ impl<T> Mutex<T> {
     /// Acquire lock guard if mutex is not locked,
     /// otherwise block until the lock is released.
     pub fn lock(&self) -> MutexGuard<T> {
-        while self.state.swap(MUTEX_LOCKED, Acquire) == MUTEX_LOCKED {
-            // Wait until lock state is no longer MUTEX_LOCKED.
-            wait(&self.state, MUTEX_LOCKED);
+        // Skip atomic-wait if there is no contention.
+        if self
+            .state
+            .compare_exchange(MUTEX_UNLOCKED, MUTEX_LOCKED, Acquire, Relaxed)
+            .is_err()
+        {
+            while self.state.swap(MUTEX_CONTENTION, Acquire) != MUTEX_UNLOCKED {
+                // Wait until lock state is no longer MUTEX_CONTENTION.
+                wait(&self.state, MUTEX_CONTENTION);
+            }
         }
         MutexGuard { mutex: self }
     }
@@ -66,9 +74,11 @@ impl<T> DerefMut for MutexGuard<'_, T> {
 
 impl<T> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
-        // Release the lock and wake any one blocked thread.
-        self.mutex.state.store(MUTEX_UNLOCKED, Release);
-        wake_one(&self.mutex.state);
+        // Release the lock and
+        if self.mutex.state.swap(MUTEX_UNLOCKED, Release) == MUTEX_CONTENTION {
+            // wake any one blocked thread if lock-contention.
+            wake_one(&self.mutex.state);
+        }
     }
 }
 
