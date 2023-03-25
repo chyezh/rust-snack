@@ -1,5 +1,6 @@
 use std::{
     cell::UnsafeCell,
+    hint,
     ops::{Deref, DerefMut},
     sync::atomic::AtomicU32,
     sync::atomic::Ordering::{Acquire, Relaxed, Release},
@@ -41,12 +42,32 @@ impl<T> Mutex<T> {
             .compare_exchange(MUTEX_UNLOCKED, MUTEX_LOCKED, Acquire, Relaxed)
             .is_err()
         {
-            while self.state.swap(MUTEX_CONTENTION, Acquire) != MUTEX_UNLOCKED {
-                // Wait until lock state is no longer MUTEX_CONTENTION.
-                wait(&self.state, MUTEX_CONTENTION);
-            }
+            // Slow path if lock-contention happens,
+            // Spin lock or wait for waking.
+            Self::lock_contented(&self.state);
         }
         MutexGuard { mutex: self }
+    }
+
+    #[cold]
+    fn lock_contented(state: &AtomicU32) {
+        let mut spin_count = 100;
+        while state.load(Relaxed) == MUTEX_LOCKED && spin_count > 0 {
+            spin_count -= 1;
+            hint::spin_loop();
+        }
+
+        if state
+            .compare_exchange(MUTEX_UNLOCKED, MUTEX_LOCKED, Acquire, Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+
+        while state.swap(MUTEX_CONTENTION, Acquire) != MUTEX_UNLOCKED {
+            // Wait until lock state is no longer MUTEX_CONTENTION.
+            wait(state, MUTEX_CONTENTION);
+        }
     }
 }
 
@@ -82,6 +103,7 @@ impl<T> Drop for MutexGuard<'_, T> {
     }
 }
 
+#[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
     use super::Mutex;

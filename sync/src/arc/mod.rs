@@ -156,6 +156,7 @@ impl<T> Drop for Weak<T> {
     }
 }
 
+#[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
     use super::*;
