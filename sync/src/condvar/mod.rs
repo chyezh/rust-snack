@@ -1,5 +1,5 @@
 use super::mutex::MutexGuard;
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicU32, AtomicUsize};
 
 use atomic_wait::{wait, wake_all, wake_one};

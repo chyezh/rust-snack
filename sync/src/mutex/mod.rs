@@ -95,7 +95,7 @@ impl<T> DerefMut for MutexGuard<'_, T> {
 
 impl<T> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
-        // Release the lock and
+        // Release the lock
         if self.mutex.state.swap(MUTEX_UNLOCKED, Release) == MUTEX_CONTENTION {
             // wake any one blocked thread if lock-contention.
             wake_one(&self.mutex.state);
