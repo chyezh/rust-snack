@@ -7,12 +7,13 @@ use std::{
     },
 };
 
-use atomic_wait::{wait, wake_one};
+use atomic_wait::{wait, wake_all, wake_one};
 
 const RWLOCK_WLOCKED: u32 = u32::MAX;
 
 pub struct RwLock<T> {
-    state: AtomicU32, // counter of reader, RWLOCK_WLOCKED for write lock
+    state: AtomicU32,               // Counter of reader, RWLOCK_WLOCKED for write lock.
+    writer_wake_counter: AtomicU32, // Counter of wake up writer. Just like a Condvar.
     value: UnsafeCell<T>,
 }
 
@@ -23,9 +24,10 @@ unsafe impl<T> Sync for RwLock<T> where T: Send + Sync {}
 
 impl<T> RwLock<T> {
     /// Create a new rwlock for given value.
-    pub fn new(value: T) -> Self {
+    pub const fn new(value: T) -> Self {
         Self {
             state: AtomicU32::new(0),
+            writer_wake_counter: AtomicU32::new(0),
             value: UnsafeCell::new(value),
         }
     }
@@ -54,19 +56,14 @@ impl<T> RwLock<T> {
 
     /// Write lock fro value
     pub fn write(&self) -> WriteGuard<T> {
-        loop {
-            // Block until no readers and writer.
-            match self
-                .state
-                .compare_exchange_weak(0, RWLOCK_WLOCKED, Relaxed, Relaxed)
-            {
-                Ok(_) => {
-                    // Lock success, fence with acquire ordering and break.
-                    fence(Acquire);
-                    break;
-                }
-                // Block until state modified.
-                Err(e) => wait(&self.state, e),
+        while self
+            .state
+            .compare_exchange(0, RWLOCK_WLOCKED, Acquire, Relaxed)
+            .is_err()
+        {
+            let x = self.writer_wake_counter.load(Acquire);
+            if self.state.load(Relaxed) != 0 {
+                wait(&self.writer_wake_counter, x);
             }
         }
         WriteGuard { lock: self }
@@ -90,7 +87,9 @@ impl<T> Drop for ReadGuard<'_, T> {
     fn drop(&mut self) {
         // Release the lock
         if self.lock.state.fetch_sub(1, Release) == 1 {
-            wake_one(&self.lock.state);
+            // Notifying for writers.
+            self.lock.writer_wake_counter.fetch_add(1, Release);
+            wake_one(&self.lock.writer_wake_counter);
         }
     }
 }
@@ -121,7 +120,10 @@ impl<T> Drop for WriteGuard<'_, T> {
     fn drop(&mut self) {
         // Release the lock
         self.lock.state.store(0, Release);
-        wake_one(&self.lock.state);
+        self.lock.writer_wake_counter.fetch_add(1, Release);
+        // Wake up one writer and wake up all reader.
+        wake_one(&self.lock.writer_wake_counter);
+        wake_all(&self.lock.state)
     }
 }
 
