@@ -2,7 +2,7 @@ use std::{
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
     sync::atomic::{
-        fence, AtomicU32,
+        AtomicU32,
         Ordering::{Acquire, Relaxed, Release},
     },
 };
