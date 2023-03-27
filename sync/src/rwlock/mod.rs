@@ -1,12 +1,13 @@
 use std::{
     cell::UnsafeCell,
-    fmt::Write,
     ops::{Deref, DerefMut},
     sync::atomic::{
         fence, AtomicU32,
         Ordering::{Acquire, Relaxed, Release},
     },
 };
+
+use atomic_wait::{wait, wake_one};
 
 const RWLOCK_WLOCKED: u32 = u32::MAX;
 
@@ -31,18 +32,21 @@ impl<T> RwLock<T> {
 
     /// Read lock for value.
     pub fn read(&self) -> ReadGuard<T> {
+        let mut x = self.state.load(Relaxed);
         loop {
-            let x = self.state.load(Relaxed);
             // Block until write lock released.
-            if x != RWLOCK_WLOCKED
-                && self
-                    .state
-                    .compare_exchange(x, x + 1, Relaxed, Relaxed)
-                    .is_ok()
-            {
-                // Lock success, fence with acquire ordering and break.
-                fence(Acquire);
-                break;
+            if x == RWLOCK_WLOCKED {
+                wait(&self.state, RWLOCK_WLOCKED);
+                x = self.state.load(Relaxed);
+                continue;
+            }
+            match self.state.compare_exchange_weak(x, x + 1, Relaxed, Relaxed) {
+                Ok(_) => {
+                    // Lock success, fence with acquire ordering and break.
+                    fence(Acquire);
+                    break;
+                }
+                Err(e) => x = e,
             }
         }
         ReadGuard { lock: self }
@@ -52,14 +56,17 @@ impl<T> RwLock<T> {
     pub fn write(&self) -> WriteGuard<T> {
         loop {
             // Block until no readers and writer.
-            if self
+            match self
                 .state
-                .compare_exchange(0, RWLOCK_WLOCKED, Relaxed, Relaxed)
-                .is_ok()
+                .compare_exchange_weak(0, RWLOCK_WLOCKED, Relaxed, Relaxed)
             {
-                // Lock success, fence with acquire ordering and break.
-                fence(Acquire);
-                break;
+                Ok(_) => {
+                    // Lock success, fence with acquire ordering and break.
+                    fence(Acquire);
+                    break;
+                }
+                // Block until state modified.
+                Err(e) => wait(&self.state, e),
             }
         }
         WriteGuard { lock: self }
@@ -82,7 +89,9 @@ impl<T> Deref for ReadGuard<'_, T> {
 impl<T> Drop for ReadGuard<'_, T> {
     fn drop(&mut self) {
         // Release the lock
-        self.lock.state.fetch_sub(1, Release);
+        if self.lock.state.fetch_sub(1, Release) == 1 {
+            wake_one(&self.lock.state);
+        }
     }
 }
 
@@ -112,6 +121,7 @@ impl<T> Drop for WriteGuard<'_, T> {
     fn drop(&mut self) {
         // Release the lock
         self.lock.state.store(0, Release);
+        wake_one(&self.lock.state);
     }
 }
 
