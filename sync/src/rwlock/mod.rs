@@ -36,19 +36,20 @@ impl<T> RwLock<T> {
     pub fn read(&self) -> ReadGuard<T> {
         let mut x = self.state.load(Relaxed);
         loop {
-            // Block until write lock released.
-            if x == RWLOCK_WLOCKED {
-                wait(&self.state, RWLOCK_WLOCKED);
+            // Block until no pending writer.
+            if x % 2 == 1 {
+                wait(&self.state, x);
                 x = self.state.load(Relaxed);
-                continue;
             }
-            match self.state.compare_exchange_weak(x, x + 1, Relaxed, Relaxed) {
-                Ok(_) => {
-                    // Lock success, fence with acquire ordering and break.
-                    fence(Acquire);
-                    break;
+            // There's no writer waiting.
+            if x % 2 == 0 {
+                assert!(x != u32::MAX - 2, "too many readers");
+                match self.state.compare_exchange_weak(x, x + 2, Acquire, Relaxed) {
+                    Ok(_) => {
+                        break;
+                    }
+                    Err(e) => x = e,
                 }
-                Err(e) => x = e,
             }
         }
         ReadGuard { lock: self }
@@ -56,16 +57,41 @@ impl<T> RwLock<T> {
 
     /// Write lock fro value
     pub fn write(&self) -> WriteGuard<T> {
-        while self
-            .state
-            .compare_exchange(0, RWLOCK_WLOCKED, Acquire, Relaxed)
-            .is_err()
-        {
-            let x = self.writer_wake_counter.load(Acquire);
-            if self.state.load(Relaxed) != 0 {
-                wait(&self.writer_wake_counter, x);
+        let mut x = self.state.load(Relaxed);
+        loop {
+            // Try to lock if there's no locking.
+            if x <= 1 {
+                match self
+                    .state
+                    .compare_exchange(x, RWLOCK_WLOCKED, Acquire, Relaxed)
+                {
+                    Ok(_) => break,
+                    Err(e) => {
+                        x = e;
+                        continue;
+                    }
+                }
+            }
+
+            // Block new incoming reader.
+            if x % 2 == 0 {
+                match self.state.compare_exchange(x, x + 1, Relaxed, Relaxed) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        x = e;
+                        continue;
+                    }
+                }
+            }
+
+            // Wait if there're readers.
+            let w = self.writer_wake_counter.load(Acquire);
+            if self.state.load(Relaxed) >= 2 {
+                wait(&self.writer_wake_counter, w);
+                x = self.state.load(Relaxed);
             }
         }
+
         WriteGuard { lock: self }
     }
 }
@@ -86,7 +112,7 @@ impl<T> Deref for ReadGuard<'_, T> {
 impl<T> Drop for ReadGuard<'_, T> {
     fn drop(&mut self) {
         // Release the lock
-        if self.lock.state.fetch_sub(1, Release) == 1 {
+        if self.lock.state.fetch_sub(2, Release) == 3 {
             // Notifying for writers.
             self.lock.writer_wake_counter.fetch_add(1, Release);
             wake_one(&self.lock.writer_wake_counter);
